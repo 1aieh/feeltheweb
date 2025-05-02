@@ -1,0 +1,535 @@
+//------------------------------------------------------------------------------
+#include "chai3d.h"
+//------------------------------------------------------------------------------
+#include <GLFW/glfw3.h>
+//------------------------------------------------------------------------------
+#include <iostream> // Include for standard output
+//------------------------------------------------------------------------------
+using namespace chai3d;
+using namespace std;
+//------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+// GENERAL SETTINGS
+//------------------------------------------------------------------------------
+
+// stereo Mode - disable for this demo
+cStereoMode stereoMode = C_STEREO_DISABLED;
+
+// fullscreen mode - disable for this demo
+bool fullscreen = false;
+
+// mirrored display - disable for this demo
+bool mirroredDisplay = false;
+
+//------------------------------------------------------------------------------
+// DECLARED VARIABLES
+//------------------------------------------------------------------------------
+
+// a world that contains all objects of the virtual environment
+cWorld* world;
+
+// a camera to render the world in the window display
+cCamera* camera;
+
+// a viewport to display the scene viewed by the camera
+cViewport* viewport = nullptr;
+
+// a light source to illuminate the objects in the world
+cDirectionalLight *light;
+
+// a haptic device handler
+cHapticDeviceHandler* handler;
+
+// a pointer to the current haptic device
+cGenericHapticDevicePtr hapticDevice;
+
+// a virtual tool representing the haptic device in the scene
+cToolCursor* tool;
+
+// The static button object (a rectangular box)
+cShapeBox* staticButton;
+
+// a flag to indicate if the haptic simulation currently running
+bool simulationRunning = false;
+
+// a flag to indicate if the haptic simulation has terminated
+bool simulationFinished = true;
+
+// mouse position (kept for potential future use, not used in this minimal demo)
+double mouseX, mouseY;
+
+// a frequency counter to measure the simulation graphic rate
+cFrequencyCounter freqCounterGraphics;
+
+// a frequency counter to measure the simulation haptic rate
+cFrequencyCounter freqCounterHaptics;
+
+// haptic thread
+cThread* hapticsThread;
+
+// a handle to window display context
+GLFWwindow* window = nullptr;
+
+// current size of GLFW window
+int windowW = 0;
+int windowH = 0;
+
+// current size of GLFW framebuffer
+int framebufferW = 0;
+int framebufferH = 0;
+
+// swap interval for the display context (vertical synchronization)
+int swapInterval = 1; // 1 for V-Sync
+
+//------------------------------------------------------------------------------
+// DECLARED FUNCTIONS
+//------------------------------------------------------------------------------
+
+// callback when the window is resized
+void onWindowSizeCallback(GLFWwindow* a_window, int a_width, int a_height);
+
+// callback when the window framebuffer is resized
+void onFrameBufferSizeCallback(GLFWwindow* a_window, int a_width, int a_height);
+
+// callback when an error GLFW occurs
+void onErrorCallback(int a_error, const char* a_description);
+
+// callback when a key is pressed (used for quitting)
+void onKeyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, int a_mods);
+
+// this function renders the scene
+void renderGraphics(void);
+
+// this function contains the main haptics simulation loop
+void renderHaptics(void);
+
+// this function closes the application
+void close(void);
+
+
+//==============================================================================
+/*
+    DEMO: static-button-demo.cpp
+
+    This application illustrates a basic setup with one static haptic button
+    using Chai3D and Geomagic Touch.
+*/
+//==============================================================================
+
+int main(int argc, char* argv[])
+{
+    //--------------------------------------------------------------------------
+    // INITIALIZATION
+    //--------------------------------------------------------------------------
+
+    cout << endl;
+    cout << "-----------------------------------" << endl;
+    cout << "CHAI3D" << endl;
+    cout << "Demo: static-button-demo" << endl;
+    cout << "-----------------------------------" << endl << endl;
+    cout << "Keyboard Options:" << endl;
+    cout << "[q] - Exit application" << endl;
+    cout << endl;
+
+
+    //--------------------------------------------------------------------------
+    // OPEN GL - WINDOW DISPLAY
+    //--------------------------------------------------------------------------
+
+    // initialize GLFW library
+    if (!glfwInit())
+    {
+        cout << "failed initialization" << endl;
+        cSleepMs(1000);
+        return 1;
+    }
+
+    // set GLFW error callback
+    glfwSetErrorCallback(onErrorCallback);
+
+    // compute desired size of window
+    const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
+    windowW = 0.5 * mode->height;
+    windowH = 0.5 * mode->height;
+    int x = 0.5 * (mode->width - windowW);
+    int y = 0.5 * (mode->height - windowH);
+
+    // set OpenGL version
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+
+    // enable double buffering
+    glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
+
+    // set the desired number of samples to use for multisampling
+    glfwWindowHint(GLFW_SAMPLES, 4);
+
+    // specify that window should be resized based on monitor content scale
+    glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
+
+    // create display context
+    window = glfwCreateWindow(windowW, windowH, "CHAI3D Static Button Demo", NULL, NULL);
+    if (!window)
+    {
+        cout << "failed to create window" << endl;
+        cSleepMs(1000);
+        glfwTerminate();
+        return 1;
+    }
+
+    // set GLFW key callback
+    glfwSetKeyCallback(window, onKeyCallback);
+
+    // set GLFW window size callback
+    glfwSetWindowSizeCallback(window, onWindowSizeCallback);
+
+    // set GLFW framebuffer size callback
+    glfwSetFramebufferSizeCallback(window, onFrameBufferSizeCallback);
+
+    // set GLFW current display context
+    glfwMakeContextCurrent(window);
+
+    // set GLFW swap interval for the current display context
+    glfwSwapInterval(swapInterval);
+
+#ifdef GLEW_VERSION
+    // initialize GLEW library
+    if (glewInit() != GLEW_OK)
+    {
+        cout << "failed to initialize GLEW library" << endl;
+        glfwTerminate();
+        return 1;
+    }
+#endif
+
+
+    //--------------------------------------------------------------------------
+    // WORLD - CAMERA - LIGHTING
+    //--------------------------------------------------------------------------
+
+    // create a new world.
+    world = new cWorld();
+
+    // set the background color of the environment (light gray)
+    world->m_backgroundColor.setGray(0.3f);
+
+    // create a camera and insert it into the virtual world
+    camera = new cCamera(world);
+    world->addChild(camera);
+
+    // position and orient the camera
+    camera->set(cVector3d(0.5, 0.0, 0.5),    // camera position (eye)
+                cVector3d(0.0, 0.0, 0.0),    // lookat position (target)
+                cVector3d(0.0, 0.0, 1.0));   // direction of the (up) vector
+
+    // set the near and far clipping planes of the camera
+    camera->setClippingPlanes(0.01, 10.0);
+
+    // create a light source
+    light = new cDirectionalLight(world);
+
+    // attach light to camera
+    camera->addChild(light);
+
+    // enable light source
+    light->setEnabled(true);
+
+    // position the light source
+    light->setLocalPos(0.0, 0.5, 1.0);
+
+    // define the direction of the light beam
+    light->setDir(0.0,-0.5, -1.0);
+
+
+    //--------------------------------------------------------------------------
+    // HAPTIC DEVICES / TOOLS
+    //--------------------------------------------------------------------------
+
+    // create a haptic device handler
+    handler = new cHapticDeviceHandler();
+
+    // get access to the first available haptic device
+    handler->getDevice(hapticDevice, 0);
+
+    if (!hapticDevice)
+    {
+        cout << "No haptic device found. Exiting." << endl;
+        cSleepMs(2000);
+        glfwTerminate();
+        return 1;
+    }
+
+    // retrieve information about the current haptic device
+    cHapticDeviceInfo hapticDeviceInfo = hapticDevice->getSpecifications();
+
+    // if the haptic devices carries a gripper, enable it to behave like a user switch
+    hapticDevice->setEnableGripperUserSwitch(true); // Useful for button press later
+
+    // create a tool (cursor) and insert into the world
+    tool = new cToolCursor(world);
+    world->addChild(tool);
+
+    // connect the haptic device to the tool
+    tool->setHapticDevice(hapticDevice);
+
+    // map the physical workspace of the haptic device to a larger virtual workspace.
+    // Adjust this value based on desired scaling
+    double workspaceScaleFactor = tool->getWorkspaceScaleFactor(); // Get default based on radius/device workspace
+    tool->setWorkspaceRadius(hapticDeviceInfo.m_maxWorkspaceRadius * 0.9); // Use 90% of device workspace
+
+    // define the radius of the tool (sphere) - adjust as needed for interaction feel
+    double toolRadius = 0.008;
+    tool->setRadius(toolRadius);
+
+    // hide the device sphere. only show proxy. (Proxy is the computed collision point)
+    tool->setShowContactPoints(true, false);
+
+    // enable if objects in the scene are going to rotate of translate
+    // or possibly collide against the tool.
+    tool->enableDynamicObjects(false); // Set to true if objects move or rotate
+
+    // start the haptic tool
+    tool->start();
+
+
+    //--------------------------------------------------------------------------
+    // CREATE STATIC BUTTON OBJECT
+    //--------------------------------------------------------------------------
+
+    // get stiffness properties from device specs
+    // Scale stiffness by the workspace scale factor for better feel across different scales
+    double maxStiffness	= hapticDeviceInfo.m_maxLinearStiffness / workspaceScaleFactor;
+
+    // You can also get max force, damping, friction, etc.
+    double maxForce = hapticDeviceInfo.m_maxLinearForce; // Use max force for other effects if needed
+    // double maxDamping = hapticDeviceInfo.m_maxLinearDamping / workspaceScaleFactor; // For damping
+
+    // create the static button box
+    double buttonWidth = 0.1;
+    double buttonHeight = 0.05;
+    double buttonDepth = 0.03; // The "pressable" depth
+    staticButton = new cShapeBox(buttonWidth, buttonHeight, buttonDepth);
+    world->addChild(staticButton);
+
+    // Position the button in the world (e.g., slightly in front of the origin)
+    staticButton->setLocalPos(0.0, 0.0, 0.05);
+
+    // Set visual material (e.g., a simple gray)
+    staticButton->m_material->setGrayLight();
+    staticButton->m_material->setSpecularColor(cColorf(0.1, 0.1, 0.1));
+    staticButton->m_material->setShininess(5);
+
+    // Set haptic properties for the static button
+    // For a static button feeling like a rigid block, stiffness is key.
+    // Choose a stiffness value relative to the device's max stiffness.
+    // A value between 0.5 * maxStiffness and 1.0 * maxStiffness usually feels rigid.
+    staticButton->m_material->setStiffness(0.8 * maxStiffness); // Use 80% of max stiffness
+
+    // Add a surface haptic effect. This effect handles the contact force based on stiffness.
+    staticButton->createEffectSurface();
+
+    // (Optional) For the static baseline, you *could* add a very subtle friction or vibration here
+    // if you wanted a minimal non-stiffness cue for differentiation in your actual experiment.
+    // staticButton->m_material->setStaticFriction(0.1 * maxForce); // Example using a fraction of maxForce for scaling friction
+    // staticButton->m_material->setDynamicFriction(0.1 * maxForce);
+    // cEffectVibration* vibEffect = new cEffectVibration(staticButton);
+    // staticButton->addEffect(vibEffect);
+    // vibEffect->setFrequency(50); // Hz
+    // vibEffect->setAmplitude(0.01 * maxForce); // Amplitude scaled by max force
+
+
+    //--------------------------------------------------------------------------
+    // VIEWPORT DISPLAY
+    //--------------------------------------------------------------------------
+
+    // get content scale factor
+    float contentScaleW, contentScaleH;
+    glfwGetWindowContentScale(window, &contentScaleW, &contentScaleH);
+
+    // create a viewport to display the scene.
+    viewport = new cViewport(camera, contentScaleW, contentScaleH);
+
+
+    //--------------------------------------------------------------------------
+    // START HAPTIC SIMULATION THREAD
+    //--------------------------------------------------------------------------
+
+    // create a thread which starts the main haptics rendering loop
+    hapticsThread = new cThread();
+    hapticsThread->start(renderHaptics, CTHREAD_PRIORITY_HAPTICS);
+
+    // setup callback when application exits
+    atexit(close);
+
+
+    //--------------------------------------------------------------------------
+    // MAIN GRAPHIC LOOP
+    //--------------------------------------------------------------------------
+
+    // main graphic loop
+    while (!glfwWindowShouldClose(window))
+    {
+        // render graphics
+        renderGraphics();
+
+        // process events
+        glfwPollEvents();
+    }
+
+    // close window
+    glfwDestroyWindow(window);
+
+    // terminate GLFW library
+    glfwTerminate();
+
+    // exit
+    return 0;
+}
+
+//------------------------------------------------------------------------------
+
+void onWindowSizeCallback(GLFWwindow* a_window, int a_width, int a_height)
+{
+    // update window size
+    windowW = a_width;
+    windowH = a_height;
+
+    // render scene
+    renderGraphics();
+}
+
+//------------------------------------------------------------------------------
+
+void onFrameBufferSizeCallback(GLFWwindow* a_window, int a_width, int a_height)
+{
+    // update frame buffer size
+    framebufferW = a_width;
+    framebufferH = a_height;
+}
+
+//------------------------------------------------------------------------------
+
+void onErrorCallback(int a_error, const char* a_description)
+{
+    cout << "Error: " << a_description << endl;
+}
+
+//------------------------------------------------------------------------------
+
+void onKeyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, int a_mods)
+{
+    // filter calls that only include a key press
+    if ((a_action != GLFW_PRESS) && (a_action != GLFW_REPEAT))
+    {
+        return;
+    }
+
+    // option - exit
+    else if ((a_key == GLFW_KEY_ESCAPE) || (a_key == GLFW_KEY_Q))
+    {
+        glfwSetWindowShouldClose(a_window, GLFW_TRUE);
+    }
+}
+
+//------------------------------------------------------------------------------
+
+void close(void)
+{
+    // stop the simulation
+    simulationRunning = false;
+
+    // wait for graphics and haptics loops to terminate
+    while (!simulationFinished) { cSleepMs(100); }
+
+    // close haptic device
+    if (hapticDevice)
+    {
+       hapticDevice->close();
+    }
+
+
+    // delete resources
+    delete hapticsThread;
+    delete world;
+    delete handler;
+
+    cout << "Application closed." << endl;
+}
+
+//------------------------------------------------------------------------------
+
+void renderGraphics(void)
+{
+    // sanity check
+    if (viewport == nullptr){ return; }
+
+    /////////////////////////////////////////////////////////////////////
+    // RENDER SCENE
+    /////////////////////////////////////////////////////////////////////
+
+    // update shadow maps (if any)
+    world->updateShadowMaps(false, mirroredDisplay);
+
+    // render world
+    viewport->renderView(framebufferW, framebufferH);
+
+    // wait until all GL commands are completed
+    glFinish();
+
+    // check for any OpenGL errors
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR) cout << "Error:  %s\n" << gluErrorString(error);
+
+    // swap buffers
+    glfwSwapBuffers(window);
+
+    // signal frequency counter
+    freqCounterGraphics.signal(1);
+}
+
+//------------------------------------------------------------------------------
+
+void renderHaptics(void)
+{
+    // simulation in now running
+    simulationRunning  = true;
+    simulationFinished = false;
+
+    // main haptic simulation loop
+    while(simulationRunning)
+    {
+        /////////////////////////////////////////////////////////////////////////
+        // HAPTIC RENDERING
+        /////////////////////////////////////////////////////////////////////////
+
+        // signal frequency counter
+        freqCounterHaptics.signal(1);
+
+        // compute global reference frames for each object
+        world->computeGlobalPositions(true);
+
+        // update position and orientation of tool
+        tool->updateFromDevice();
+
+        // compute interaction forces
+        tool->computeInteractionForces();
+
+        // send forces to haptic device
+        tool->applyToDevice();
+
+        // -----------------------------------------------------------------
+        // NOTE: Any custom haptic effects (like dynamic button forces
+        // based on penetration depth for the "fleshed out" group) would
+        // be calculated and applied using tool->setDeviceGlobalForce()
+        // AFTER tool->updateFromDevice() and BEFORE tool->applyToDevice().
+        // For this static demo, the force is computed by the
+        // cEffectSurface automatically based on material stiffness.
+        // -----------------------------------------------------------------
+    }
+
+    // exit haptics thread
+    simulationFinished = true;
+}
+
+//------------------------------------------------------------------------------
