@@ -1,0 +1,5 @@
+﻿  10-oring.cpp
+C:\chai3d-3.3.0\examples\GLFW\10-oring\10-oring.cpp(263,19): error C2039: 'addDeviceForce': is not a member of 'chai3d::cToolCursor'
+      C:\chai3d-3.3.0\src\tools\CToolCursor.h(79,7):
+      see declaration of 'chai3d::cToolCursor'
+  
