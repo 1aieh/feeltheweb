@@ -1,10 +1,15 @@
 //------------------------------------------------------------------------------
 #include "chai3d.h"
 //------------------------------------------------------------------------------
+#include <fstream>
+#include <iomanip>
+#include <random>
 #include <GLFW/glfw3.h>
+#include <__random/random_device.h>
 //------------------------------------------------------------------------------
 using namespace chai3d;
 using namespace std;
+using ofstream = basic_ofstream<char>;
 //------------------------------------------------------------------------------
 
 //------------------------------------------------------------------------------
@@ -30,7 +35,11 @@ bool mirroredDisplay = false;
 // DECLARED CONSTANTS
 //------------------------------------------------------------------------------
 
-const int NUM_BUTTONS = 4;
+const string PARTICIPANT_NAME = "Daniel";
+const double ROUND_TIME = 15.0; // seconds
+const int NUMBER_OF_ROUNDS = 3; // rounds
+const int NUM_BUTTONS = 5;
+
 const double BUTTON_WIDTH = 0.15;
 const double BUTTON_HEIGHT = 0.05;
 
@@ -39,48 +48,71 @@ const double BUTTON_HEIGHT = 0.05;
 //------------------------------------------------------------------------------
 
 // a world that contains all objects of the virtual environment
-cWorld* world;
+cWorld *world;
 
 // a camera to render the world in the window display
-cCamera* camera;
+cCamera *camera;
 
 // a viewport to display the scene viewed by the camera
-cViewport* viewport = nullptr;
+cViewport *viewport = nullptr;
 
 // a light source to illuminate the objects in the world
-cDirectionalLight* light;
+cDirectionalLight *light;
 
 // a haptic device handler
-cHapticDeviceHandler* handler;
+cHapticDeviceHandler *handler;
 
 // a pointer to the current haptic device
 cGenericHapticDevicePtr hapticDevice;
 
 // a virtual tool representing the haptic device in the scene
-cToolCursor* tool;
+cToolCursor *tool;
+
+struct ButtonState {
+    cMesh *mesh;
+    bool clicked = false;
+    double clickTime = 0.0;
+    int clickSequence = -1; // -1 means not clicked yet
+    bool active = false;
+};
 
 // a few mesh objects
-cMesh* object0;
-cMesh* object1;
-cMesh* object2;
-cMesh* object3;
-cMesh* objectBackground;
-cMesh* buttons[NUM_BUTTONS];
+cMesh *startButton;
+cMesh *objectBackground;
+ButtonState buttons[NUM_BUTTONS];
+
+cNormalMapPtr buttonNormalMap;
+cTexture2dPtr buttonTexture;
+cMaterialPtr buttonMaterial;
 
 // a colored background
-cBackground* background;
+cBackground *background;
 
 // a font for rendering text
 cFontPtr font;
 
 // a label to display the rate [Hz] at which the simulation is running
-cLabel* labelRates;
+cLabel *labelRates;
+
+// a label to display the round count
+cLabel *labelRound;
+
+// a label to display the time left in the round
+cLabel *labelRoundTime;
 
 // a flag that indicates if the haptic simulation is currently running
 bool simulationRunning = false;
 
 // a flag that indicates if the haptic simulation has terminated
 bool simulationFinished = true;
+
+// mouse position
+double mouseX, mouseY;
+
+double maxStiffness;
+
+// set radius of tool
+double toolRadius = 0.01;
 
 // a frequency counter to measure the simulation graphic rate
 cFrequencyCounter freqCounterGraphics;
@@ -89,10 +121,10 @@ cFrequencyCounter freqCounterGraphics;
 cFrequencyCounter freqCounterHaptics;
 
 // haptic thread
-cThread* hapticsThread;
+cThread *hapticsThread;
 
 // a handle to window display context
-GLFWwindow* window = nullptr;
+GLFWwindow *window = nullptr;
 
 // current size of GLFW window
 int windowW = 0;
@@ -105,25 +137,46 @@ int framebufferH = 0;
 // swap interval for the display context (vertical synchronization)
 int swapInterval = 1;
 
+//? EXPERIMENT VARIABLES
+string executionId;
+int experimentNumber = 0; // 0 = all buttons light up, 1 = one button at a time lights up
+int roundCount = 0;
+int maxRounds = NUMBER_OF_ROUNDS;
+bool timerActive;
+double timeLeft;
+double previousTime;
+
+int clickCount; //number of clicks the user makes x round
+int clickCountError; //number of clicks where the user didn't click on the correct button
+
+int lastClickedButtonIndex; // -1 means no button clicked yet
+int buttonsClicked;
+double timerStartTime; // Time when timer was started (seconds)
+double lastClickTime; // Time of last button click (seconds)
+
+std::ofstream dataFile; // File for logging experiment data
 
 //------------------------------------------------------------------------------
 // DECLARED FUNCTIONS
 //------------------------------------------------------------------------------
 
 // callback when the window is resized
-void onWindowSizeCallback(GLFWwindow* a_window, int a_width, int a_height);
+void onWindowSizeCallback(GLFWwindow *a_window, int a_width, int a_height);
 
 // callback when the window framebuffer is resized
-void onFrameBufferSizeCallback(GLFWwindow* a_window, int a_width, int a_height);
+void onFrameBufferSizeCallback(GLFWwindow *a_window, int a_width, int a_height);
 
 // callback when an error GLFW occurs
-void onErrorCallback(int a_error, const char* a_description);
+void onErrorCallback(int a_error, const char *a_description);
 
 // callback when a key is pressed
-void onKeyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, int a_mods);
+void onKeyCallback(GLFWwindow *a_window, int a_key, int a_scancode, int a_action, int a_mods);
+
+// callback to handle mouse click
+void onMouseButtonCallback(GLFWwindow *a_window, int a_button, int a_action, int a_mods);
 
 // callback when window content scaling is modified
-void onWindowContentScaleCallback(GLFWwindow* a_window, float a_xscale, float a_yscale);
+void onWindowContentScaleCallback(GLFWwindow *a_window, float a_xscale, float a_yscale);
 
 // this function renders the scene
 void renderGraphics(void);
@@ -133,6 +186,26 @@ void renderHaptics(void);
 
 // this function closes the application
 void close(void);
+
+void randomizeButtonPositions();
+
+void createButtons();
+
+void setupNewRound();
+
+void removeAllButtons();
+
+void destroyStartButton();
+
+void createStartButton();
+
+void startExperiment();
+
+void writeRoundToFile();
+
+string generateRunId();
+
+void activateNewRandomButton();
 
 
 //==============================================================================
@@ -144,8 +217,7 @@ void close(void);
 */
 //==============================================================================
 
-int main(int argc, char* argv[])
-{
+int main(int argc, char *argv[]) {
     //--------------------------------------------------------------------------
     // INITIALIZATION
     //--------------------------------------------------------------------------
@@ -158,7 +230,8 @@ int main(int argc, char* argv[])
     cout << "-----------------------------------" << endl << endl << endl;
     cout << "Keyboard Options:" << endl << endl;
     cout << "[f] - Enable/Disable full screen mode" << endl;
-    cout << "[m] - Enable/Disable vertical mirroring" << endl;
+    cout << "[s] - Start Task" << endl;
+    cout << "[r] - Randomize Button Position" << endl;
     cout << "[q] - Exit application" << endl;
     cout << endl << endl;
 
@@ -172,8 +245,7 @@ int main(int argc, char* argv[])
     //--------------------------------------------------------------------------
 
     // initialize GLFW library
-    if (!glfwInit())
-    {
+    if (!glfwInit()) {
         cout << "failed initialization" << endl;
         cSleepMs(1000);
         return 1;
@@ -183,9 +255,12 @@ int main(int argc, char* argv[])
     glfwSetErrorCallback(onErrorCallback);
 
     // compute desired size of window
-    const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
+    const GLFWvidmode *mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
     windowW = 0.8 * mode->height;
     windowH = 0.5 * mode->height;
+
+    cout << "Window size: " << windowW << " x " << windowH << endl;
+
     int x = 0.5 * (mode->width - windowW);
     int y = 0.5 * (mode->height - windowH);
 
@@ -203,19 +278,15 @@ int main(int argc, char* argv[])
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
 
     // set active stereo mode
-    if (stereoMode == C_STEREO_ACTIVE)
-    {
+    if (stereoMode == C_STEREO_ACTIVE) {
         glfwWindowHint(GLFW_STEREO, GL_TRUE);
-    }
-    else
-    {
+    } else {
         glfwWindowHint(GLFW_STEREO, GL_FALSE);
     }
 
     // create display context
     window = glfwCreateWindow(windowW, windowH, "CHAI3D", NULL, NULL);
-    if (!window)
-    {
+    if (!window) {
         cout << "failed to create window" << endl;
         cSleepMs(1000);
         glfwTerminate();
@@ -224,6 +295,9 @@ int main(int argc, char* argv[])
 
     // set GLFW key callback
     glfwSetKeyCallback(window, onKeyCallback);
+
+    // set GLFW mouse button callback
+    glfwSetMouseButtonCallback(window, onMouseButtonCallback);
 
     // set GLFW window size callback
     glfwSetWindowSizeCallback(window, onWindowSizeCallback);
@@ -275,9 +349,9 @@ int main(int argc, char* argv[])
     world->addChild(camera);
 
     // position and orient the camera
-    camera->set(cVector3d(0.0, 0.0, 1.0),    // camera position (eye)
-        cVector3d(0.0, 0.0, 0.0),    // lookat position (target)
-        cVector3d(0.0, 1.0, 0.0));   // direction of the (up) vector
+    camera->set(cVector3d(0.0, 0.0, 1.0), // camera position (eye)
+                cVector3d(0.0, 0.0, 0.0), // lookat position (target)
+                cVector3d(0.0, 1.0, 0.0)); // direction of the (up) vector
 
     // set the near and far clipping planes of the camera
     // anything in front or behind these clipping planes will not be rendered
@@ -351,9 +425,6 @@ int main(int argc, char* argv[])
     // connect the haptic device to the tool
     tool->setHapticDevice(hapticDevice);
 
-    // set radius of tool
-    double toolRadius = 0.01;
-
     // define a radius for the tool
     tool->setRadius(toolRadius);
 
@@ -361,8 +432,8 @@ int main(int argc, char* argv[])
     tool->setWorkspaceRadius(1.0);
 
     // haptic forces are enabled only if small forces are first sent to the device;
-    // this mode avoids the force spike that occurs when the application starts when 
-    // the tool is located inside an object for instance. 
+    // this mode avoids the force spike that occurs when the application starts when
+    // the tool is located inside an object for instance.
     tool->setWaitForSmallForce(true);
 
     // start the haptic tool
@@ -378,314 +449,75 @@ int main(int argc, char* argv[])
     double workspaceScaleFactor = tool->getWorkspaceScaleFactor();
 
     // properties
-    double maxStiffness = hapticDeviceInfo.m_maxLinearStiffness / workspaceScaleFactor;
+    maxStiffness = hapticDeviceInfo.m_maxLinearStiffness / workspaceScaleFactor;
+
+
+    buttonTexture = cTexture2d::create();
+    fileload = buttonTexture->loadFromFile(currentpath + "../resources/images/sand.jpg");
+
+    if (!fileload) {
+        cout << "Error - Texture image failed to load correctly." << endl;
+        close();
+        return (-1);
+    }
+
+    buttonNormalMap = cNormalMap::create();
+    buttonNormalMap->createMap(buttonTexture);
+
+    buttonMaterial = cMaterial::create();
+    buttonMaterial->setRedDark();
+    buttonMaterial->setStiffness(0.5 * maxStiffness);
+    buttonMaterial->setStaticFriction(0.3);
+    buttonMaterial->setDynamicFriction(0.6);
+    buttonMaterial->setTextureLevel(1);
+    buttonMaterial->setHapticTriangleSides(true, false);
+
 
     /////////////////////////////////////////////////////////////////////////
     // CREATE BUTTONS
     /////////////////////////////////////////////////////////////////////////
 
-    for (int i = 0; i < NUM_BUTTONS; i++) {
-		buttons[i] = new cMesh();
-		cCreatePlane(buttons[i], BUTTON_WIDTH, BUTTON_HEIGHT);
-
-		buttons[i]->createAABBCollisionDetector(toolRadius);
-		world->addChild(buttons[i]);
-
-		buttons[i]->setLocalPos(0.0, 0.0 + (0.1 * i), 0.0);
-		buttons[i]->m_texture = cTexture2d::create();
-		fileload = buttons[i]->m_texture->loadFromFile(currentpath + "../resources/images/sand.jpg");
-
-        if (!fileload)
-        {
-            cout << "Error - Texture image failed to load correctly." << endl;
-            close();
-            return (-1);
-        }
-
-        // enable texture mapping
-        buttons[i]->setUseTexture(false);
-        buttons[i]->m_material->setPink();
-
-        // create normal map from texture data
-        cNormalMapPtr normalMap0 = cNormalMap::create();
-        normalMap0->createMap(buttons[i]->m_texture);
-        buttons[i]->m_normalMap = normalMap0;
-
-        // set haptic properties
-        buttons[i]->m_material->setStiffness(0.5 * maxStiffness);
-        buttons[i]->m_material->setStaticFriction(0.3);
-        buttons[i]->m_material->setDynamicFriction(0.6);
-        buttons[i]->m_material->setTextureLevel(1);
-        buttons[i]->m_material->setHapticTriangleSides(true, false);
-
-    }
-
-    /////////////////////////////////////////////////////////////////////////
-    // OBJECT 0:
-    /////////////////////////////////////////////////////////////////////////
-
-    // create a mesh
-    object0 = new cMesh();
-
-    // create plane
-    cCreatePlane(object0, 0.15, 0.05);
-
-    // create collision detector
-    object0->createAABBCollisionDetector(toolRadius);
-
-    // add object to world
-    //world->addChild(object0);
-
-    // set the position of the object
-    object0->setLocalPos(-0.2, -0.2, 0.0);
-
-    // set graphic properties
-    object0->m_texture = cTexture2d::create();
-    fileload = object0->m_texture->loadFromFile(currentpath + "../resources/images/sand.jpg");
-
-    if (!fileload)
-    {
-        cout << "Error - Texture image failed to load correctly." << endl;
-        close();
-        return (-1);
-    }
-
-    // enable texture mapping
-    object0->setUseTexture(false);
-    object0->m_material->setPink();
-
-    // create normal map from texture data
-    cNormalMapPtr normalMap0 = cNormalMap::create();
-    normalMap0->createMap(object0->m_texture);
-    object0->m_normalMap = normalMap0;
-
-    // set haptic properties
-    object0->m_material->setStiffness(0.5 * maxStiffness);
-    object0->m_material->setStaticFriction(0.3);
-    object0->m_material->setDynamicFriction(0.3);
-    object0->m_material->setTextureLevel(0.6);
-    object0->m_material->setHapticTriangleSides(true, false);
-
-
-    /////////////////////////////////////////////////////////////////////////
-    // OBJECT 1:
-    ////////////////////////////////////////////////////////////////////////
-
-    // create a mesh
-    object1 = new cMesh();
-
-    // create plane
-    cCreatePlane(object1, 0.3, 0.3);
-
-    // create collision detector
-    object1->createAABBCollisionDetector(toolRadius);
-
-    // add object to world
-    //world->addChild(object1);
-
-    // set the position of the object
-    object1->setLocalPos(0.2, -0.2, 0.0);
-
-    // set graphic properties
-    object1->m_texture = cTexture2d::create();
-    fileload = object1->m_texture->loadFromFile(currentpath + "../resources/images/whitefoam.jpg");
-    if (!fileload)
-    {
-        cout << "Error - Texture image failed to load correctly." << endl;
-        close();
-        return (-1);
-    }
-
-    // enable texture mapping
-    object1->setUseTexture(false);
-    object1->m_material->setPink();
-
-    // create normal map from texture data
-    cNormalMapPtr normalMap1 = cNormalMap::create();
-    normalMap1->createMap(object1->m_texture);
-    object1->m_normalMap = normalMap1;
-
-    // set haptic properties
-    object1->m_material->setStiffness(0.1 * maxStiffness);
-    object1->m_material->setStaticFriction(0.3);
-    object1->m_material->setDynamicFriction(0.3);
-    object1->m_material->setTextureLevel(0.8);
-    object1->m_material->setHapticTriangleSides(true, false);
-
-
-    /////////////////////////////////////////////////////////////////////////
-    // OBJECT 2:
-    /////////////////////////////////////////////////////////////////////////
-
-    // create a mesh
-    object2 = new cMesh();
-
-    // create plane
-    cCreatePlane(object2, 0.3, 0.3);
-
-    // create collision detector
-    object2->createAABBCollisionDetector(toolRadius);
-
-    // add object to world
-    //world->addChild(object2);
-
-    // set the position of the object
-    object2->setLocalPos(0.2, 0.2, 0.0);
-
-    // set graphic properties
-    object2->m_texture = cTexture2d::create();
-    fileload = object2->m_texture->loadFromFile(currentpath + "../resources/images/brownboard.jpg");
-    if (!fileload)
-    {
-        cout << "Error - Texture image failed to load correctly." << endl;
-        close();
-        return (-1);
-    }
-
-    // enable texture mapping
-    object2->setUseTexture(true);
-    object2->m_material->setWhite();
-
-    // create normal map from texture data
-    cNormalMapPtr normalMap2 = cNormalMap::create();
-    normalMap2->createMap(object2->m_texture);
-    object2->m_normalMap = normalMap2;
-
-    // set haptic properties
-    object2->m_material->setStiffness(0.2 * maxStiffness);
-    object2->m_material->setStaticFriction(0.3);
-    object2->m_material->setDynamicFriction(0.3);
-    object2->m_material->setTextureLevel(0.2);
-    object2->m_material->setHapticTriangleSides(true, false);
-
-
-    /////////////////////////////////////////////////////////////////////////
-    // OBJECT 3:
-    ////////////////////////////////////////////////////////////////////////
-
-    // create a mesh
-    object3 = new cMesh();
-
-    // create plane
-    cCreatePlane(object3, 0.3, 0.3);
-
-    // create collision detector
-    object3->createAABBCollisionDetector(toolRadius);
-
-    // add object to world
-    //world->addChild(object3);
-
-    // set the position of the object
-    object3->setLocalPos(-0.2, 0.2, 0.0);
-
-    // set graphic properties
-    object3->m_texture = cTexture2d::create();
-    fileload = object3->m_texture->loadFromFile(currentpath + "../resources/images/blackstone.jpg");
-    if (!fileload)
-    {
-        cout << "Error - Texture image failed to load correctly." << endl;
-        close();
-        return (-1);
-    }
-
-    // enable texture mapping
-    object3->setUseTexture(true);
-    object3->m_material->setWhite();
-
-    // create normal map from texture data
-    cNormalMapPtr normalMap3 = cNormalMap::create();
-    normalMap3->createMap(object3->m_texture);
-    object3->m_normalMap = normalMap3;
-    normalMap3->setTextureUnit(GL_TEXTURE0_ARB);
-
-    // set haptic properties
-    object3->m_material->setStiffness(0.7 * maxStiffness);
-    object3->m_material->setStaticFriction(0.4);
-    object3->m_material->setDynamicFriction(0.3);
-    object3->m_material->setTextureLevel(0.3);
-    object3->m_material->setHapticTriangleSides(true, false);
+    setupNewRound();
 
     /////////////////////////////////////////////////////////////////////////
     // OBJECT BACKGROUND:
+    ////////////////////////////////////////////////////////////////////////
 
-  ////////////////////////////////////////////////////////////////////////
-
-  // create a mesh
-
+    // create a mesh
     objectBackground = new cMesh();
-
-
-
     // create plane
-
     cCreatePlane(objectBackground, 1.5, 1.5);
-
-
 
     // create collision detector
 
     objectBackground->createAABBCollisionDetector(toolRadius);
-
-
-
     // add object to world
 
     world->addChild(objectBackground);
-
-
-
     // set the position of the object
-
     objectBackground->setLocalPos(0.0, 0.0, -0.001);
 
-
-
-
-
-
-
-
-
     // enable texture mapping
-
-    objectBackground->setUseTexture(true);
-
     objectBackground->m_material->setWhite();
-
-
-
-    // create normal map from texture data
-
-    cNormalMapPtr normalMapBackground = cNormalMap::create();
-
-    normalMapBackground->createMap(objectBackground->m_texture);
-
-    objectBackground->m_normalMap = normalMapBackground;
-
-
-
-    // set haptic properties
-
-    objectBackground->m_material->setStiffness(0.1 * maxStiffness);
-
-    objectBackground->m_material->setStaticFriction(0.3);
-
-    objectBackground->m_material->setDynamicFriction(0.3);
-
-    objectBackground->m_material->setTextureLevel(0.8);
-
-    objectBackground->m_material->setHapticTriangleSides(true, false);
 
     //--------------------------------------------------------------------------
     // WIDGETS
     //--------------------------------------------------------------------------
 
     // create a font
-    font = NEW_CFONT_CALIBRI_20();
+    font = NEW_CFONT_CALIBRI_32();
 
     // create a label to display the haptic and graphic rate of the simulation
     labelRates = new cLabel(font);
-    camera->m_frontLayer->addChild(labelRates);
+    // camera->m_frontLayer->addChild(labelRates);
+
+    // label to show the round count
+    labelRound = new cLabel(font);
+    camera->m_frontLayer->addChild(labelRound);
+
+    // label to show the round count
+    labelRoundTime = new cLabel(font);
+    camera->m_frontLayer->addChild(labelRoundTime);
 
     // create a background
     background = new cBackground();
@@ -693,9 +525,19 @@ int main(int argc, char* argv[])
 
     // set background properties
     background->setCornerColors(cColorf(0.3, 0.3, 0.3),
-        cColorf(0.2, 0.2, 0.2),
-        cColorf(0.1, 0.1, 0.1),
-        cColorf(0.0, 0.0, 0.0));
+                                cColorf(0.2, 0.2, 0.2),
+                                cColorf(0.1, 0.1, 0.1),
+                                cColorf(0.0, 0.0, 0.0));
+
+    //--------------------------------------------------------------------------
+    // DATA FILE SETUP
+    //--------------------------------------------------------------------------
+    // Open data file in append mode
+    executionId = generateRunId();
+    dataFile.open(currentpath + "../resources/experiment_data.csv", std::ios_base::app);
+    if (!dataFile.is_open()) {
+        cout << "Failed to open data file for writing." << endl;
+    }
 
 
     //--------------------------------------------------------------------------
@@ -727,8 +569,7 @@ int main(int argc, char* argv[])
     //--------------------------------------------------------------------------
 
     // main graphic loop
-    while (!glfwWindowShouldClose(window))
-    {
+    while (!glfwWindowShouldClose(window)) {
         // render graphics
         renderGraphics();
 
@@ -746,10 +587,250 @@ int main(int argc, char* argv[])
     return 0;
 }
 
+string generateRunId() {
+    // Get current time as seed enhancer
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count() % 1000;
+
+    // Create random generator with multiple entropy sources
+    std::random_device rd;
+    std::mt19937 gen(rd() ^
+                    static_cast<unsigned int>(time_t_now) ^
+                    static_cast<unsigned int>(millis));
+    std::uniform_int_distribution<> dis(0, 15);
+
+    // Generate a 16-character hex string
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+
+    for (int i = 0; i < 16; ++i) {
+        ss << dis(gen);
+    }
+
+    return ss.str();
+}
+
+void createButtons() {
+    for (auto &button: buttons) {
+        button = ButtonState();
+        button.mesh = new cMesh();
+        cCreatePlane(button.mesh, BUTTON_WIDTH, BUTTON_HEIGHT);
+
+        button.mesh->createAABBCollisionDetector(toolRadius);
+        world->addChild(button.mesh);
+
+        button.mesh->setLocalPos(0.0, 0.0, 0.0);
+
+        // enable texture mapping
+        button.mesh->m_texture = buttonTexture;
+        button.mesh->setUseTexture(false);
+        button.mesh->m_normalMap = buttonNormalMap;
+
+        // set haptic properties
+        button.mesh->setMaterial(buttonMaterial->copy());
+
+        if (experimentNumber == 0) {
+            button.active = true;
+            continue;
+        }
+
+        // experiment 1 setup
+        button.mesh->m_material->setGrayLight();
+        button.active = false;
+    }
+
+    // EXPERIMENT 1 > first button activation
+    if (experimentNumber == 1) activateNewRandomButton();
+}
+
+void activateNewRandomButton() {
+    // Randomly select a button to activate
+    int randomIndex = rand() % NUM_BUTTONS;
+    while (buttons[randomIndex].active) {
+        randomIndex = rand() % NUM_BUTTONS;
+    }
+    buttons[randomIndex].active = true;
+    buttons[randomIndex].mesh->m_material->setRedDark();
+}
+
+void removeAllButtons() {
+    for (auto &button: buttons) {
+        if (button.mesh == nullptr) continue;
+
+        world->removeChild(button.mesh);
+        delete button.mesh;
+        button.mesh = nullptr;
+    }
+}
+
+void randomizeButtonPositions() {
+    // Calculate world dimensions based on window aspect ratio
+    double aspectRatio = (double) windowW / windowH;
+    double worldHeight = 0.8; // Base height in world coordinates
+    double worldWidth = worldHeight * aspectRatio; // Width adjusted by aspect ratio
+
+    // Margins in world coordinates
+    double topMargin = 0.1; // 30px from top in world coords
+    double bottomMargin = 0.1; // 30px from bottom in world coords
+    double minDistance = 0.20; // Minimum 50px apart in world coords
+
+    // Area where buttons can be placed
+    double minX = -worldWidth / 2 + BUTTON_WIDTH / 2;
+    double maxX = worldWidth / 2 - BUTTON_WIDTH / 2;
+    double minY = -worldHeight / 2 + BUTTON_HEIGHT / 2 + bottomMargin;
+    double maxY = worldHeight / 2 - BUTTON_HEIGHT / 2 - topMargin;
+
+    // Store positions of already placed buttons
+    vector<cVector3d> placedPositions;
+
+    // Seed random generator
+    srand(static_cast<unsigned int>(time(NULL)));
+
+    // Place each button
+    for (int i = 0; i < NUM_BUTTONS; i++) {
+        cVector3d newPos;
+        bool validPosition = false;
+        int attempts = 0;
+        const int maxAttempts = 100;
+
+        // Try to find valid position
+        while (!validPosition && attempts < maxAttempts) {
+            // Generate random position
+            double x = minX + ((double) rand() / RAND_MAX) * (maxX - minX);
+            double y = minY + ((double) rand() / RAND_MAX) * (maxY - minY);
+            newPos = cVector3d(x, y, 0.0);
+
+            // Check if position is valid using Euclidean distance
+            validPosition = true;
+            for (const auto &pos: placedPositions) {
+                double distance = sqrt(pow(pos.x() - newPos.x(), 2) +
+                                       pow(pos.y() - newPos.y(), 2));
+                if (distance < minDistance) {
+                    validPosition = false;
+                    break;
+                }
+            }
+            attempts++;
+        }
+
+        // Position the button
+        buttons[i].mesh->setLocalPos(newPos);
+        placedPositions.push_back(newPos);
+    }
+}
+
+void createStartButton() {
+    if (startButton != nullptr) return;
+    startButton = new cMesh();
+    cCreatePlane(startButton, BUTTON_WIDTH, BUTTON_HEIGHT);
+
+    startButton->createAABBCollisionDetector(toolRadius);
+    world->addChild(startButton);
+
+    startButton->setLocalPos(0.0, 0.0, 0.0);
+
+    // enable texture mapping
+    startButton->m_texture = buttonTexture;
+    startButton->setUseTexture(false);
+    startButton->m_normalMap = buttonNormalMap;
+
+    // set haptic properties
+    startButton->setMaterial(buttonMaterial->copy());
+}
+
+void destroyStartButton() {
+    if (startButton == nullptr) return;
+    world->removeChild(startButton);
+    delete startButton;
+    startButton = nullptr;
+}
+
+
+void setupNewRound() {
+    removeAllButtons();
+    cout << "buttons removed" << endl;
+
+    // Write data to file for the completed round (except for first round setup)
+    if (roundCount > 0 && dataFile.is_open()) {
+        writeRoundToFile();
+        cout << "round saved" << endl;
+    }
+
+
+    timerActive = false;
+    timeLeft = ROUND_TIME;
+    previousTime = 0.0;
+
+    lastClickedButtonIndex = -1; // -1 means no button clicked yet
+    buttonsClicked = 0;
+    timerStartTime = 0.0; // Time when timer was started (seconds)
+    lastClickTime = 0.0; // Time of last button click (seconds)
+
+    clickCount = 0;
+    clickCountError = 0;
+
+    roundCount++;
+    cout << "variables initialized" << endl;
+
+    createStartButton();
+
+    if (roundCount <= maxRounds) return;
+
+    if (experimentNumber == 0) {
+        experimentNumber = 1;
+        roundCount = 0;
+        setupNewRound();
+        cout << "reset everything for new experiment" << endl;
+        return;
+    }
+
+    // End of experiment
+    cout << "Experiments completed!" << endl;
+    glfwSetWindowShouldClose(window, GLFW_TRUE);
+}
+
+void writeRoundToFile() {
+    dataFile << executionId << "," << PARTICIPANT_NAME << "," << experimentNumber << "," << NUM_BUTTONS << "," << NUMBER_OF_ROUNDS << "," << ROUND_TIME << "," << roundCount << ","
+                << clickCount << "," << clickCountError;
+
+    // Create a vector of button indices
+    vector<int> clickedButtons;
+    for (int i = 0; i < NUM_BUTTONS; i++) {
+        if (buttons[i].clicked) clickedButtons.push_back(i);
+    }
+
+    // Sort the indices by click sequence
+    sort(clickedButtons.begin(), clickedButtons.end(),
+         [](int a, int b) { return buttons[a].clickSequence < buttons[b].clickSequence; });
+
+    // Print the information in order
+    for (int idx: clickedButtons) dataFile << "," << buttons[idx].clickTime;
+
+    dataFile << endl;
+    dataFile.flush(); // Ensure data is written immediately
+}
+
+void startExperiment() {
+    // Remove start button
+    destroyStartButton();
+
+    // Create buttons
+    createButtons();
+
+    // Randomize button positions
+    randomizeButtonPositions();
+
+    timerActive = true;
+    timerStartTime = glfwGetTime(); // Store when timer started
+    previousTime = timerStartTime; // For timer countdown
+    cout << "Timer started!" << endl;
+}
+
 //------------------------------------------------------------------------------
 
-void onWindowSizeCallback(GLFWwindow* a_window, int a_width, int a_height)
-{
+void onWindowSizeCallback(GLFWwindow *a_window, int a_width, int a_height) {
     // update window size
     windowW = a_width;
     windowH = a_height;
@@ -760,8 +841,7 @@ void onWindowSizeCallback(GLFWwindow* a_window, int a_width, int a_height)
 
 //------------------------------------------------------------------------------
 
-void onFrameBufferSizeCallback(GLFWwindow* a_window, int a_width, int a_height)
-{
+void onFrameBufferSizeCallback(GLFWwindow *a_window, int a_width, int a_height) {
     // update frame buffer size
     framebufferW = a_width;
     framebufferH = a_height;
@@ -769,54 +849,44 @@ void onFrameBufferSizeCallback(GLFWwindow* a_window, int a_width, int a_height)
 
 //------------------------------------------------------------------------------
 
-void onWindowContentScaleCallback(GLFWwindow* a_window, float a_xscale, float a_yscale)
-{
+void onWindowContentScaleCallback(GLFWwindow *a_window, float a_xscale, float a_yscale) {
     // update window content scale factor
     viewport->setContentScale(a_xscale, a_yscale);
 }
 
 //------------------------------------------------------------------------------
 
-void onErrorCallback(int a_error, const char* a_description)
-{
+void onErrorCallback(int a_error, const char *a_description) {
     cout << "Error: " << a_description << endl;
 }
 
 //------------------------------------------------------------------------------
 
-void onKeyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action, int a_mods)
-{
+void onKeyCallback(GLFWwindow *a_window, int a_key, int a_scancode, int a_action, int a_mods) {
     // filter calls that only include a key press
-    if ((a_action != GLFW_PRESS) && (a_action != GLFW_REPEAT))
-    {
+    if ((a_action != GLFW_PRESS) && (a_action != GLFW_REPEAT)) return;
+
+    // ESC || Q key > option - exit
+    if ((a_key == GLFW_KEY_ESCAPE) || (a_key == GLFW_KEY_Q)) {
+        glfwSetWindowShouldClose(a_window, GLFW_TRUE);
         return;
     }
 
-    // option - exit
-    else if ((a_key == GLFW_KEY_ESCAPE) || (a_key == GLFW_KEY_Q))
-    {
-        glfwSetWindowShouldClose(a_window, GLFW_TRUE);
-    }
-
-    // option - toggle fullscreen
-    else if (a_key == GLFW_KEY_F)
-    {
+    // F key > option - toggle fullscreen
+    if (a_key == GLFW_KEY_F) {
         // toggle state variable
         fullscreen = !fullscreen;
 
         // get handle to monitor
-        GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+        GLFWmonitor *monitor = glfwGetPrimaryMonitor();
 
         // get information about monitor
-        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        const GLFWvidmode *mode = glfwGetVideoMode(monitor);
 
         // set fullscreen or window mode
-        if (fullscreen)
-        {
+        if (fullscreen) {
             glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
-        }
-        else
-        {
+        } else {
             int w = 0.8 * mode->height;
             int h = 0.5 * mode->height;
             int x = 0.5 * (mode->width - w);
@@ -827,20 +897,30 @@ void onKeyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action
         // set the desired swap interval and number of samples to use for multisampling
         glfwSwapInterval(swapInterval);
         glfwWindowHint(GLFW_SAMPLES, 4);
+        return;
     }
 
-    // option - toggle vertical mirroring
-    else if (a_key == GLFW_KEY_M)
-    {
-        mirroredDisplay = !mirroredDisplay;
-        camera->setMirrorVertical(mirroredDisplay);
+    // S Key > start timer
+    if (a_key == GLFW_KEY_S) {
+        setupNewRound();
+        timerActive = true;
+        timerStartTime = glfwGetTime(); // Store when timer started
+        previousTime = timerStartTime; // For timer countdown
+        cout << "Timer started!" << endl;
+    }
+
+
+    if (a_key == GLFW_KEY_R) {
+        randomizeButtonPositions();
     }
 }
 
 //------------------------------------------------------------------------------
 
-void close(void)
-{
+void close(void) {
+    // Close data file
+    if (dataFile.is_open()) dataFile.close();
+
     // stop the simulation
     simulationRunning = false;
 
@@ -850,6 +930,7 @@ void close(void)
     // close haptic device
     tool->stop();
 
+
     // delete resources
     delete hapticsThread;
     delete world;
@@ -858,10 +939,27 @@ void close(void)
 
 //------------------------------------------------------------------------------
 
-void renderGraphics(void)
-{
+void renderGraphics(void) {
     // sanity check
     if (viewport == nullptr) { return; }
+
+    // Update the timer if it's active
+    if (timerActive) {
+        double currentTime = glfwGetTime();
+        double deltaTime = currentTime - previousTime;
+        previousTime = currentTime;
+
+        if (timeLeft > 0.0) {
+            timeLeft -= deltaTime;
+            if (timeLeft < 0.0) {
+                timeLeft = 0.0;
+                timerActive = false;
+                // Handle timer completion
+                setupNewRound();
+                cout << "Time's up for round " << roundCount << endl;
+            }
+        }
+    }
 
     /////////////////////////////////////////////////////////////////////
     // UPDATE WIDGETS
@@ -872,12 +970,20 @@ void renderGraphics(void)
     int displayH = viewport->getDisplayHeight();
 
     // update haptic and graphic rate data
-    labelRates->setText(cStr(freqCounterGraphics.getFrequency(), 0) + " Hz / " +
-        cStr(freqCounterHaptics.getFrequency(), 0) + " Hz");
+    // labelRates->setText(cStr(freqCounterGraphics.getFrequency(), 0) + " Hz / " +
+    //     cStr(freqCounterHaptics.getFrequency(), 0) + " Hz");
+    //
+    // // update position of label
+    // labelRates->setLocalPos((int)(0.5 * (displayW - labelRates->getWidth())), 15);
 
-    // update position of label
-    labelRates->setLocalPos((int)(0.5 * (displayW - labelRates->getWidth())), 15);
+    //? Label Round
+    labelRound->setText(PARTICIPANT_NAME + " | Experiment " + cStr(experimentNumber) +  " | Round " + cStr(roundCount));
+    labelRound->setLocalPos(static_cast<int>(0.5 * (displayW - labelRound->getWidth())),
+                            displayH - labelRound->getHeight() - 10);
 
+    //? Label Round Timing
+    labelRoundTime->setText("Time left: " + cStr(timeLeft, 1) + " seconds");
+    labelRoundTime->setLocalPos(static_cast<int>(0.5 * (displayW - labelRoundTime->getWidth())), 15);
 
     /////////////////////////////////////////////////////////////////////
     // RENDER SCENE
@@ -905,47 +1011,16 @@ void renderGraphics(void)
 
 //------------------------------------------------------------------------------
 
-//void renderHaptics(void)
-//{
-//    // simulation in now running
-//    simulationRunning = true;
-//    simulationFinished = false;
-//
-//    // main haptic simulation loop
-//    while (simulationRunning)
-//    {
-//        // compute global reference frames for each object
-//        world->computeGlobalPositions(true);
-//
-//        // update position and orientation of tool
-//        tool->updateFromDevice();
-//
-//        // compute interaction forces
-//        tool->computeInteractionForces();
-//
-//        // send forces to haptic device
-//        tool->applyToDevice();
-//
-//        // signal frequency counter
-//        freqCounterHaptics.signal(1);
-//    }
-//
-//    // exit haptics thread
-//    simulationFinished = true;
-//}
-
-enum cMode
-{
-	IDLE,
-	SELECTION
+enum cMode {
+    IDLE,
+    SELECTION
 };
 
-void renderHaptics(void)
-{
-    cMultiMesh* object;
+void renderHaptics(void) {
+    cMultiMesh *object;
 
     cMode state = IDLE;
-    cGenericObject* selectedObject = NULL;
+    cGenericObject *selectedObject = NULL;
     cTransform tool_T_object;
 
     // simulation in now running
@@ -956,8 +1031,7 @@ void renderHaptics(void)
     const double MAX_TOOL_Z_WORLD = 0.001;
 
     // main haptic simulation loop
-    while (simulationRunning)
-    {
+    while (simulationRunning) {
         /////////////////////////////////////////////////////////////////////////
         // HAPTIC RENDERING
         /////////////////////////////////////////////////////////////////////////
@@ -982,7 +1056,7 @@ void renderHaptics(void)
         chai3d::cVector3d modifiedDeviceGlobalPos(
             currentDeviceGlobalPos.x(), // X from device
             currentDeviceGlobalPos.y(), // Y from device
-            clampedDeviceZ              // Z is clamped to the defined range
+            clampedDeviceZ // Z is clamped to the defined range
         );
 
         // 5. Set this modified position back as the tool's understanding of the device's global position.
@@ -991,7 +1065,6 @@ void renderHaptics(void)
         tool->setDeviceGlobalPos(modifiedDeviceGlobalPos);
 
         tool->computeInteractionForces();
-
 
 
         /////////////////////////////////////////////////////////////////////////
@@ -1008,29 +1081,57 @@ void renderHaptics(void)
         // STATE 1:
         // Idle mode - user presses the user switch
         //
-        if ((state == IDLE) && (button == true))
-        {
+        if ((state == IDLE) && (button == true)) {
             cout << "button clicked" << endl;
             // check if at least one contact has occurred
-            if (tool->m_hapticPoint->getNumCollisionEvents() > 0)
-            {
+            if (tool->m_hapticPoint->getNumCollisionEvents() > 0) {
                 // get contact event
-                cCollisionEvent* collisionEvent = tool->m_hapticPoint->getCollisionEvent(0);
+                cCollisionEvent *collisionEvent = tool->m_hapticPoint->getCollisionEvent(0);
 
                 // get object from contact event
                 selectedObject = collisionEvent->m_object;
 
-                // determine which of the 4 objects in the scene was selected
+                if (!timerActive) {
+                    if (selectedObject == startButton) {
+                        startExperiment();
+                    }
+                } else {
+                    clickCount++;
+                    cout << "Click detected! Click count: " << clickCount << endl;
 
-				for (int i = 0; i < NUM_BUTTONS; i++)
-				{
-					if (selectedObject == buttons[i])
-					{
-                        cout << "button clicked " << i << endl;
-                        buttons[i]->m_material->setBlack();
-						break;
-					}
-				}
+                    bool isCorrectButton = false;
+                    for (int i = 0; i < NUM_BUTTONS; i++) {
+                        if (selectedObject == buttons[i].mesh && !buttons[i].clicked && buttons[i].active) {
+                            isCorrectButton = true;
+
+                            buttons[i].clicked = true;
+                            buttons[i].mesh->m_material->setGreenDark();
+
+                            // Record click timing
+                            const double currentTime = glfwGetTime();
+
+                            buttons[i].clickTime = lastClickedButtonIndex == -1
+                                                       ? (currentTime - timerStartTime) * 1000.0 // first button clicked
+                                                       : (currentTime - lastClickTime) * 1000.0;
+                            // subsequent button clicked
+
+                            // Record sequence
+                            buttons[i].clickSequence = buttonsClicked++;
+                            lastClickTime = currentTime;
+                            lastClickedButtonIndex = i;
+
+                            if (buttonsClicked >= NUM_BUTTONS) setupNewRound();
+                            else if (experimentNumber == 1) activateNewRandomButton();
+
+                            break;
+                        }
+                    }
+
+                    if (!isCorrectButton) {
+                        clickCountError++;
+                        cout << "Incorrect object clicked! Error count: " << clickCountError << endl;
+                    }
+                }
             }
 
             // update state
@@ -1042,17 +1143,14 @@ void renderHaptics(void)
         // STATE 2:
         // Selection mode - operator maintains user switch enabled and moves object
         //
-        else if ((state == SELECTION) && (button == true))
-        {
-
+        else if ((state == SELECTION) && (button == true)) {
         }
 
         //
         // STATE 3:
         // Finalize Selection mode - operator releases user switch.
         //
-        else
-        {
+        else {
             state = IDLE;
         }
 
@@ -1067,6 +1165,66 @@ void renderHaptics(void)
 
     // exit haptics thread
     simulationFinished = true;
+}
+
+void onMouseButtonCallback(GLFWwindow *a_window, int a_button, int a_action, int a_mods) {
+    if (a_button == GLFW_MOUSE_BUTTON_LEFT && a_action == GLFW_PRESS) {
+        // store mouse position
+        glfwGetCursorPos(window, &mouseX, &mouseY);
+
+        // variable for storing collision information
+        cCollisionRecorder recorder;
+        cCollisionSettings settings;
+        cGenericObject *selectedObject = NULL;
+
+        // detect for any collision between mouse and world
+        const bool hit = camera->selectWorld(mouseX, (windowH - mouseY), windowW, windowH, recorder, settings);
+        if (hit) {
+            selectedObject = recorder.m_nearestCollision.m_object;
+
+            if (!timerActive) {
+                if (selectedObject == startButton) {
+                    startExperiment();
+                }
+            } else {
+                clickCount++;
+                cout << "Click detected! Click count: " << clickCount << endl;
+
+                bool isCorrectButton = false;
+                for (int i = 0; i < NUM_BUTTONS; i++) {
+                    if (selectedObject == buttons[i].mesh && !buttons[i].clicked && buttons[i].active) {
+                        isCorrectButton = true;
+
+                        buttons[i].clicked = true;
+                        buttons[i].mesh->m_material->setGreenDark();
+
+                        // Record click timing
+                        const double currentTime = glfwGetTime();
+
+                        buttons[i].clickTime = lastClickedButtonIndex == -1
+                                                   ? (currentTime - timerStartTime) * 1000.0 // first button clicked
+                                                   : (currentTime - lastClickTime) * 1000.0;
+                        // subsequent button clicked
+
+                        // Record sequence
+                        buttons[i].clickSequence = buttonsClicked++;
+                        lastClickTime = currentTime;
+                        lastClickedButtonIndex = i;
+
+                        if (buttonsClicked >= NUM_BUTTONS) setupNewRound();
+                        else if (experimentNumber == 1) activateNewRandomButton();
+
+                        break;
+                    }
+                }
+
+                if (!isCorrectButton) {
+                    clickCountError++;
+                    cout << "Incorrect object clicked! Error count: " << clickCountError << endl;
+                }
+            }
+        }
+    }
 }
 
 //------------------------------------------------------------------------------
