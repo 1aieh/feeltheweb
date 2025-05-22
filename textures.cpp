@@ -6,7 +6,7 @@
 #include <random>
 #include <GLFW/glfw3.h>
 #include <chrono>
-// #include <__random/random_device.h>
+
 //------------------------------------------------------------------------------
 using namespace chai3d;
 using namespace std;
@@ -101,6 +101,9 @@ cLabel* labelRound;
 
 // a label to display the time left in the round
 cLabel* labelRoundTime;
+
+// label haptics on
+cLabel* labelHapticsOn;
 
 // a flag that indicates if the haptic simulation is currently running
 bool simulationRunning = false;
@@ -233,7 +236,6 @@ int main(int argc, char* argv[]) {
     cout << "-----------------------------------" << endl << endl << endl;
     cout << "Keyboard Options:" << endl << endl;
     cout << "[f] - Enable/Disable full screen mode" << endl;
-    cout << "[t] - Toggle Haptics" << endl;
     cout << "[q] - Exit application" << endl;
     cout << endl << endl;
 
@@ -532,6 +534,9 @@ int main(int argc, char* argv[]) {
     labelRoundTime = new cLabel(font);
     camera->m_frontLayer->addChild(labelRoundTime);
 
+    labelHapticsOn = new cLabel(NEW_CFONT_CONSOLAS_16());
+    camera->m_frontLayer->addChild(labelHapticsOn);
+
     // create a background
     background = new cBackground();
     camera->m_backLayer->addChild(background);
@@ -637,9 +642,11 @@ void createButtons() {
         button.mesh->setLocalPos(0.0, 0.0, 0.0);
 
         // enable texture mapping
-        button.mesh->m_texture = buttonTexture;
-        button.mesh->setUseTexture(false);
-        button.mesh->m_normalMap = buttonNormalMap;
+        if (hapticsOn) {
+            button.mesh->m_texture = buttonTexture;
+            button.mesh->setUseTexture(false);
+            button.mesh->m_normalMap = buttonNormalMap;
+        }
 
         // set haptic properties
         button.mesh->setMaterial(buttonMaterialPlain->copy());
@@ -747,9 +754,11 @@ void createStartButton() {
     startButton->setLocalPos(0.0, 0.0, 0.0);
 
     // enable texture mapping
-    startButton->m_texture = buttonTexture;
-    startButton->setUseTexture(false);
-    startButton->m_normalMap = buttonNormalMap;
+    if (hapticsOn) {
+        startButton->m_texture = buttonTexture;
+        startButton->setUseTexture(false);
+        startButton->m_normalMap = buttonNormalMap;
+    }
 
     // set haptic properties
     startButton->setMaterial(buttonMaterialFriction->copy());
@@ -921,7 +930,7 @@ void onKeyCallback(GLFWwindow* a_window, int a_key, int a_scancode, int a_action
 
         if (!hapticsOn) {
             buttonMaterialFriction = buttonMaterialPlain;
-            
+
             if (startButton != nullptr) startButton->setMaterial(buttonMaterialPlain);
             return;
         }
@@ -1000,13 +1009,17 @@ void renderGraphics(void) {
     // labelRates->setLocalPos((int)(0.5 * (displayW - labelRates->getWidth())), 15);
 
     //? Label Round
-    labelRound->setText(cStr(hapticsOn ? 1 : 0) + " | " + PARTICIPANT_NAME + " | Experiment " + cStr(experimentNumber) + " | Round " + cStr(roundCount));
+    labelRound->setText(PARTICIPANT_NAME + " | Experiment " + cStr(experimentNumber) + " | Round " + cStr(roundCount));
     labelRound->setLocalPos(static_cast<int>(0.5 * (displayW - labelRound->getWidth())),
         displayH - labelRound->getHeight() - 10);
 
     //? Label Round Timing
     labelRoundTime->setText("Time left: " + cStr(timeLeft, 1) + " seconds");
     labelRoundTime->setLocalPos(static_cast<int>(0.5 * (displayW - labelRoundTime->getWidth())), 15);
+
+    //? Label Haptics
+    labelHapticsOn->setText(hapticsOn ? "." : "");
+    labelHapticsOn->setLocalPos(0,0);
 
     /////////////////////////////////////////////////////////////////////
     // RENDER SCENE
@@ -1091,12 +1104,14 @@ void renderHaptics(void) {
 
         // --- START CUSTOM GRAVITY WELL FORCE ---
         cVector3d cumulativeGravityForce(0, 0, 0); // Initialize force for this frame
-        if (timerActive && hapticsOn) {
+        if (!timerActive || !hapticsOn) {
+            tool->setForcesOFF();
+        } else {
             cVector3d toolProxyPos = tool->m_hapticPoint->getGlobalPosProxy(); // Use proxy for distance
             const double GRAVITY_WELL_FORCE_MAGNITUDE = 0.41;     // Newtons
             const double GRAVITY_WELL_ACTIVE_RADIUS = BUTTON_WIDTH * 0.75; // Radius for well activation
             const double GRAVITY_WELL_CENTER_DEAD_ZONE_RADIUS = 0.01; // Radius for resting in center
-            
+
             double minQualifyingDistance = GRAVITY_WELL_ACTIVE_RADIUS + 1.0; // Sentinel for closest button
             int bestButtonIdx = -1;
 
@@ -1144,11 +1159,13 @@ void renderHaptics(void) {
                     cumulativeGravityForce.z(0.0); // Make the force act only in the XY plane
                 }
             }
+            // Add the calculated gravity well force (if any)
+            if (cumulativeGravityForce.lengthsq() > 0.00000001) { // Check squared length against epsilon
+                tool->setForcesON();
+                tool->addDeviceGlobalForce(cumulativeGravityForce);
+            }
         }
-        // Add the calculated gravity well force (if any)
-        if (cumulativeGravityForce.lengthsq() > 0.00000001) { // Check squared length against epsilon
-            tool->addDeviceGlobalForce(cumulativeGravityForce);
-        }
+
         // --- END CUSTOM GRAVITY WELL FORCE ---
 
 
